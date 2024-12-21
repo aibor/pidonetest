@@ -1,5 +1,5 @@
-github.com/cavaliergopher/cpio v1.0.1 h1:KQFSeKmZhv0cr+kawA3a0xTQCU4QxXF1vhU7P7av2KM=
-github.com/cavaliergopher/cpio v1.0.1/go.mod h1:pBdaqQjnvXxdS/6CvNDwIANIFSP0xRKI16PX4xejRQc=
+github.com/aibor/cpio v0.0.0-20241217235230-d2709444f447 h1:HntTswgach6IjN8AWiJzESAPsmUQ8wGqofAoBifH3uk=
+github.com/aibor/cpio v0.0.0-20241217235230-d2709444f447/go.mod h1:nnP6RGMnxvipmrgiYWihcaGLFLPOUR9wscDqH0W6+hI=
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=

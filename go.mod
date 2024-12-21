@@ -7,7 +7,7 @@ module github.com/aibor/virtrun
 go 1.24
 
 require (
-	github.com/cavaliergopher/cpio v1.0.1
+	github.com/aibor/cpio v0.0.0-20241217235230-d2709444f447
 	github.com/stretchr/testify v1.10.0
 	go.uber.org/goleak v1.3.0
 	golang.org/x/sync v0.11.0

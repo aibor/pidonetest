@@ -13,6 +13,7 @@ import (
 	"os"
 	"slices"
 
+	"github.com/aibor/cpio"
 	"github.com/aibor/virtrun/internal/initramfs"
 	"github.com/aibor/virtrun/internal/sys"
 )
@@ -185,7 +186,7 @@ func writeFSToTempFile(fsys fs.FS, dir string) (string, error) {
 	}
 	defer file.Close()
 
-	writer := initramfs.NewCPIOFSWriter(file)
+	writer := cpio.NewWriter(file)
 	defer writer.Close()
 
 	err = writer.AddFS(fsys)
