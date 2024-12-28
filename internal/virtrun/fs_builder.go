@@ -11,7 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/aibor/virtrun/internal/initramfs"
+	"github.com/aibor/virtrun/internal/virtfs"
 )
 
 type nameFunc func(idx int, path string) string
@@ -25,14 +25,14 @@ func modName(idx int, path string) string {
 }
 
 type fsBuilder struct {
-	fs initramfs.FSAdder
+	fs virtfs.FSAdder
 }
 
 func (b *fsBuilder) mkdirAll(dir string) error {
 	return b.fs.MkdirAll(dir) //nolint:wrapcheck
 }
 
-func (b *fsBuilder) add(name string, openFn initramfs.FileOpenFunc) error {
+func (b *fsBuilder) add(name string, openFn virtfs.FileOpenFunc) error {
 	return b.fs.Add(name, openFn) //nolint:wrapcheck
 }
 

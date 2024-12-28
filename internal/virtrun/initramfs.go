@@ -14,8 +14,8 @@ import (
 	"slices"
 
 	"github.com/aibor/cpio"
-	"github.com/aibor/virtrun/internal/initramfs"
 	"github.com/aibor/virtrun/internal/sys"
+	"github.com/aibor/virtrun/internal/virtfs"
 )
 
 const (
@@ -64,14 +64,14 @@ type Initramfs struct {
 func BuildInitramfsArchive(
 	ctx context.Context,
 	cfg Initramfs,
-	initFileOpenFn initramfs.FileOpenFunc,
+	initFileOpenFn virtfs.FileOpenFunc,
 ) (string, func() error, error) {
-	irfs, err := buildInitramfsArchive(ctx, cfg, initFileOpenFn)
+	fsys, err := buildInitramfsArchive(ctx, cfg, initFileOpenFn)
 	if err != nil {
 		return "", nil, err
 	}
 
-	path, err := writeFSToTempFile(irfs, "")
+	path, err := writeFSToTempFile(fsys, "")
 	if err != nil {
 		return "", nil, err
 	}
@@ -100,8 +100,8 @@ func BuildInitramfsArchive(
 func buildInitramfsArchive(
 	ctx context.Context,
 	cfg Initramfs,
-	initFileOpenFn initramfs.FileOpenFunc,
-) (*initramfs.FS, error) {
+	initFileOpenFn virtfs.FileOpenFunc,
+) (*virtfs.FS, error) {
 	binaryFiles := []string{cfg.Binary}
 	binaryFiles = append(binaryFiles, cfg.Files...)
 
@@ -122,24 +122,24 @@ func buildInitramfsArchive(
 		}
 	}
 
-	irfs, err := buildInitramFS(cfg, libs, initFn)
+	fsys, err := buildVirtFS(cfg, libs, initFn)
 	if err != nil {
 		return nil, fmt.Errorf("build: %w", err)
 	}
 
-	return irfs, nil
+	return fsys, nil
 }
 
-// buildInitramFS creates a new [initramfs.FS].
+// buildVirtFS creates a new [virtfs.FS].
 //
 // It does not read any source files. Only the FS file tree is created.
-func buildInitramFS(
+func buildVirtFS(
 	cfg Initramfs,
 	libs sys.LibCollection,
 	initFn func(*fsBuilder, string) error,
-) (*initramfs.FS, error) {
-	irfs := initramfs.New()
-	builder := fsBuilder{irfs}
+) (*virtfs.FS, error) {
+	fsys := virtfs.New()
+	builder := fsBuilder{fsys}
 
 	err := builder.addFilePathAs("main", cfg.Binary)
 	if err != nil {
@@ -167,11 +167,11 @@ func buildInitramFS(
 	}
 
 	err = builder.symlinkTo(libsDir, slices.Collect(libs.SearchPaths()))
-	if err != nil && !errors.Is(err, initramfs.ErrFileExist) {
+	if err != nil && !errors.Is(err, virtfs.ErrFileExist) {
 		return nil, err
 	}
 
-	return irfs, nil
+	return fsys, nil
 }
 
 // writeFSToTempFile writes the [fs.FS] as CPIO archive into a new temporary
