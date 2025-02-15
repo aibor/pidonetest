@@ -10,15 +10,15 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 
 	"golang.org/x/sync/errgroup"
 )
-
-const minAdditionalFileDescriptor = 3
 
 // CommandSpec defines the parameters for a [Command].
 type CommandSpec struct {
@@ -118,8 +118,8 @@ func (c *CommandSpec) Validate() error {
 	return nil
 }
 
-// arguments compiles the argument list for the QEMU command.
-func (c *CommandSpec) arguments() []Argument {
+// staticArguments compiles the argument list for the QEMU command.
+func (c *CommandSpec) staticArguments() []Argument {
 	args := []Argument{
 		UniqueArg("kernel", c.Kernel),
 		UniqueArg("initrd", c.Initramfs),
@@ -158,18 +158,6 @@ func (c *CommandSpec) arguments() []Argument {
 		id:      "stdio",
 		backend: "stdio",
 	})
-
-	// Write console output to file descriptors. Those are provided by the
-	// [exec.Cmd.ExtraFiles].
-	for idx := range c.AdditionalConsoles {
-		// FDs 0, 1, 2 are standard in, out, err, so start at 3.
-		path := fdPath(minAdditionalFileDescriptor + idx)
-		args = c.appendConsoleArgs(args, console{
-			id:      fmt.Sprintf("con%d", idx),
-			backend: "file",
-			opts:    []string{"path=" + path},
-		})
-	}
 
 	args = append(args,
 		// Disable video output.
@@ -248,27 +236,54 @@ func (c *CommandSpec) appendConsoleArgs(
 	return append(args, chardevArg, devArg)
 }
 
-func fdPath(fd int) string {
-	return fmt.Sprintf("/dev/fd/%d", fd)
-}
-
 type Command struct {
 	name         string
 	args         []string
 	stdoutParser stdoutParser
 
-	consoleOutput []string
+	consoleOutput map[string]string
 }
 
 // NewCommand builds the final [Command] with the given [CommandSpec].
-func NewCommand(spec CommandSpec) (*Command, error) {
+//
+// Optionally, a [HashStringFunc] function can be passed that overrides the
+// default hash function. It is used for creating unique abstract unix socket
+// names.
+func NewCommand(spec CommandSpec, hashFn HashStringFunc) (*Command, error) {
 	// Do some simple input validation to catch most obvious issues.
 	err := spec.Validate()
 	if err != nil {
 		return nil, err
 	}
 
-	cmdArgs, err := BuildArgumentStrings(spec.arguments())
+	if hashFn == nil {
+		hashFn = newHashStringFunc("virtrun-qemu-")
+	}
+
+	args := spec.staticArguments()
+	consoles := map[string]string{}
+
+	for idx, path := range spec.AdditionalConsoles {
+		unixSockName := hashFn(path)
+		args = spec.appendConsoleArgs(args, console{
+			id:      "socket" + strconv.Itoa(idx),
+			backend: "socket",
+			opts: []string{
+				// Linux provides support for abstract unix sockets (see
+				// unix(7)). They are independent of the file system and exist
+				// only in the abstract socket name space. It must have a
+				// unique name, though. It is automatically removed when the
+				// listening socket is closed. Here, we configure QEMU to be
+				// the client and connect to an abstract socket that must exist
+				// already.
+				"path=" + unixSockName,
+				"abstract=on",
+			},
+		})
+		consoles[unixSockName] = path
+	}
+
+	cmdArgs, err := BuildArgumentStrings(args)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +295,7 @@ func NewCommand(spec CommandSpec) (*Command, error) {
 	cmd := &Command{
 		name:          spec.Executable,
 		args:          cmdArgs,
-		consoleOutput: spec.AdditionalConsoles,
+		consoleOutput: consoles,
 		stdoutParser: stdoutParser{
 			ExitCodeFmt: spec.ExitCodeFmt,
 			Verbose:     spec.Verbose,
@@ -296,6 +311,38 @@ func (c *Command) String() string {
 	return strings.Join(elems, " ")
 }
 
+// unixConsoleProcessor creates a function that accepts only one connection on
+// the given listener. For this connection a consoleProcessor is started that
+// writes the output into the file at the given path.
+func unixConsoleProcessor(listener net.Listener, path string) func() error {
+	// Accepts one connection. Expected to be connected from the QEMU process.
+	// Opens the output file on demand.
+	return func() error {
+		conn, err := listener.Accept()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+
+			return fmt.Errorf("socket: %w", err)
+		}
+		defer conn.Close()
+
+		dst, err := os.Create(path)
+		if err != nil {
+			return fmt.Errorf("output: %w", err)
+		}
+		defer dst.Close()
+
+		processor := consoleProcessor{
+			dst: dst,
+			src: conn,
+		}
+
+		return processor.run()
+	}
+}
+
 // Run the [Command] with the given [context.Context].
 //
 // Output processors are setup and the command is executed. Returns without
@@ -309,15 +356,7 @@ func (c *Command) Run(
 	stdin io.Reader,
 	stdout, stderr io.Writer,
 ) error {
-	outputs := []io.Closer{}
-
-	defer func() {
-		for _, closer := range outputs {
-			closeLog(closer)
-		}
-	}()
-
-	var processors errgroup.Group
+	processors, ctx := errgroup.WithContext(ctx)
 
 	cmd := exec.CommandContext(ctx, c.name, c.args...)
 
@@ -328,52 +367,28 @@ func (c *Command) Run(
 		return cmd.Process.Signal(os.Interrupt)
 	}
 
-	for _, path := range c.consoleOutput {
-		dst, err := os.Create(path)
-		if err != nil {
-			return fmt.Errorf("output file: %w", err)
-		}
-
-		outputs = append(outputs, dst)
-
-		readPipe, writePipe, err := os.Pipe()
-		if err != nil {
-			return fmt.Errorf("pipe: %w", err)
-		}
-
-		// Append the write end of the console processor pipe as extra file, so it
-		// is present as additional file descriptor which can be used with the
-		// "file" backend for QEMU console devices. The processor reads from the
-		// read end of the pipe, cleans the output and writes it into the actual
-		// target file on the host.
-		cmd.ExtraFiles = append(cmd.ExtraFiles, writePipe)
-
-		processor := consoleProcessor{
-			dst: dst,
-			src: readPipe,
-		}
-
-		processors.Go(processor.run)
-	}
-
 	cmd.Stdin = stdin
 	cmd.Stderr = stderr
 
+	// Setup stdout processor that parses the output for the sysinit's exit
+	// code line.
 	outPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("stdout pipe: %w", err)
 	}
 
-	stdoutProcessor := consoleProcessor{
+	processor := consoleProcessor{
 		dst: stdout,
 		src: outPipe,
 		fn:  c.stdoutParser.Parse,
 	}
 
-	runErr := run(cmd, stdoutProcessor)
+	processors.Go(processor.run)
 
-	err = processors.Wait()
-	if err != nil {
+	runErr := run(cmd, processors, c.consoleOutput)
+
+	// Let output processors terminate gracefully.
+	if err := processors.Wait(); err != nil {
 		return fmt.Errorf("processors: %w", err)
 	}
 
@@ -384,35 +399,45 @@ func (c *Command) Run(
 	return c.stdoutParser.GuestSuccessful()
 }
 
-func run(cmd *exec.Cmd, stdoutProcessor consoleProcessor) error {
+// run runs the given [exec.Cmd] after setting up the output processors and
+// stating them in the given processors [errgroup.Group]. It terminates the
+// input listeners on exit, so the caller can wait for the graceful shutdown of
+// the output processors.
+func run(
+	cmd *exec.Cmd,
+	processors *errgroup.Group,
+	outputs map[string]string,
+) error {
+	listeners := []io.Closer{}
+
 	defer func() {
-		for _, f := range cmd.ExtraFiles {
-			closeLog(f)
+		for _, closer := range slices.Backward(listeners) {
+			if err := closer.Close(); err != nil {
+				slog.Error(
+					"Failed to close qemu output listener",
+					slog.Any("error", err),
+				)
+			}
 		}
 	}()
 
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start: %w", err)
+	for sockName, path := range outputs {
+		// A unix socket name starting with a null byte is interpreted as an
+		// abstract unix socket address (see unix(7)).
+		listener, err := net.Listen("unix", "\x00"+sockName)
+		if err != nil {
+			return fmt.Errorf("listen: %w", err)
+		}
+
+		listeners = append(listeners, listener)
+		processors.Go(unixConsoleProcessor(listener, path))
 	}
 
-	if err := stdoutProcessor.run(); err != nil {
-		return fmt.Errorf("stdout parser: %w", err)
-	}
-
-	if err := cmd.Wait(); err != nil {
+	if err := cmd.Run(); err != nil {
 		return wrapExitError(err)
 	}
 
 	return nil
-}
-
-func closeLog(closer io.Closer) {
-	if err := closer.Close(); err != nil {
-		slog.Error(
-			"Failed to close qemu output listener",
-			slog.Any("error", err),
-		)
-	}
 }
 
 func wrapExitError(err error) error {

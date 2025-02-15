@@ -96,7 +96,7 @@ func NewQemuCommand(cfg Qemu, initramfsPath string) (*qemu.Command, error) {
 		rewriteGoTestFlagsPath(&cmdSpec)
 	}
 
-	cmd, err := qemu.NewCommand(cmdSpec)
+	cmd, err := qemu.NewCommand(cmdSpec, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build command: %w", err)
 	}
